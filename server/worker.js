@@ -8,6 +8,7 @@ const privateHeaders = {
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'self'; object-src 'none'",
 };
 const imageFields = ['promptImage', 'draftImage'];
+const draftImageLimit = 6;
 const textFields = ['kind', 'subtitle', 'status', 'updatedAt', 'origin', 'prompt', 'promptCn', 'initial',
   'draftCaution', 'model', 'translation', 'score', 'modelScore', 'scoreNote', 'notes', 'chartTitle'];
 const listFields = ['tags', 'strengths', 'weaknesses', 'actionPlan'];
@@ -122,6 +123,10 @@ function checkRecord(record) {
   for (const key of imageFields) {
     expect(!(key in record) || typeof record[key] === 'string', key + ' 应为图片 data URL。');
   }
+  if ('draftImages' in record) {
+    expect(Array.isArray(record.draftImages) && record.draftImages.length <= draftImageLimit &&
+      record.draftImages.every(value => typeof value === 'string' && value.length > 0), '手写原图最多可上传 6 张。');
+  }
 }
 function inferredType(r) {
   if (r.type) return r.type;
@@ -160,8 +165,9 @@ async function current(env, id) { return sql(env, 'SELECT * FROM current_essays 
 function unpack(row) { return JSON.parse(row.payload); }
 function visibleEssay(row) {
   const { record, assets } = unpack(row);
+  const url = asset => '/api/images/' + asset.key;
   const urls = Object.fromEntries(Object.entries(assets)
-    .map(([field, asset]) => [field, '/api/images/' + asset.key]));
+    .map(([field, asset]) => [field, Array.isArray(asset) ? asset.map(url) : url(asset)]));
   return { record: { ...record }, assets: urls, version: row.revision,
     archived: Boolean(row.archived), savedAt: row.saved_at, type: inferredType(record) };
 }
@@ -185,26 +191,43 @@ async function putEssay(env, record, expected) {
   const row = await current(env, record.id);
   expect(expected === undefined ? !row : row?.revision === expected,
     expected === undefined ? '该作文 ID 已存在。请使用新的 ID，或从文章页编辑。' : '作文已更新，请刷新后重试。', 409);
-  const assets = row ? unpack(row).assets : {};
+  const previous = row && unpack(row);
+  const assets = previous?.assets ?? {};
   const savedRecord = { ...record };
   for (const key of imageFields) {
     if (!(key in record)) {
-      if (row && key in unpack(row).record) savedRecord[key] = unpack(row).record[key];
+      if (previous && key in previous.record) savedRecord[key] = previous.record[key];
       continue;
     }
     if (record[key]) assets[key] = await storeImage(record[key], env);
     else delete assets[key];
     savedRecord[key] = '';
   }
+  if ('draftImages' in record) {
+    const images = [];
+    for (const encoded of record.draftImages) images.push(await storeImage(encoded, env));
+    if (images.length) assets.draftImages = images;
+    else delete assets.draftImages;
+    savedRecord.draftImages = [];
+  } else if (previous && 'draftImages' in previous.record) {
+    savedRecord.draftImages = previous.record.draftImages;
+  }
   expect(new TextEncoder().encode(JSON.stringify(savedRecord)).length <= 650000, '作文文本过长。', 413);
   return insertRevision(env, row, record.id, { record: savedRecord, assets }, row?.archived || 0);
 }
 async function exportRecord(env, row) {
   const { record, assets } = unpack(row);
-  for (const [key, asset] of Object.entries(assets)) {
+  const encode = async asset => {
     const blob = await env.BUCKET.get(asset.key);
     expect(blob, '备份所需的原图缺失。', 500);
-    record[key] = 'data:' + asset.mime + ';base64,' + toBase64(new Uint8Array(await blob.arrayBuffer()));
+    return 'data:' + asset.mime + ';base64,' + toBase64(new Uint8Array(await blob.arrayBuffer()));
+  };
+  for (const key of imageFields) {
+    if (assets[key]) record[key] = await encode(assets[key]);
+  }
+  if (assets.draftImages) {
+    record.draftImages = [];
+    for (const asset of assets.draftImages) record.draftImages.push(await encode(asset));
   }
   return record;
 }
@@ -316,6 +339,8 @@ const mcpTools = [
         ...Object.fromEntries(imageFields.map(name => [name, {
           type: 'string', description: '原始 JPG、PNG 或 WebP 图片的完整 data URL。不能读取图片字节时留空。',
         }])),
+        draftImages: { type: 'array', maxItems: draftImageLimit, items: { type: 'string' },
+          description: '按页序保存的 JPG、PNG 或 WebP 原始图片 data URL。' },
         ...Object.fromEntries(Object.entries(nestedFields).map(([name, fields]) => [name, {
           type: 'array', items: { type: 'object', properties: Object.fromEntries(fields.map(field => [field,
             field === 'points' ? { type: 'array', items: { type: 'string' } } :

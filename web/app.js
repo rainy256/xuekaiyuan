@@ -158,6 +158,12 @@ function photo(url, label) {
     '" target="_blank" rel="noopener">查看原尺寸</a><img loading="lazy" decoding="async" alt="' + label +
     '" src="' + e(url) + '"></details>' : '<p class="subtle">' + label + ' · 来源待补充</p>';
 }
+function draftPhotos(assets) {
+  const pages = assets.draftImages ?? [];
+  if (!pages.length) return photo(assets.draftImage, '手写原图');
+  const reading = assets.draftImage ? photo(assets.draftImage, '手写稿阅读版') : '';
+  return reading + pages.map((url, i) => photo(url, '手写原图 · 照片 ' + (i + 1))).join('');
+}
 const chartReference = {
   'e2-2021-48': { ticks: [0,10,20,30,40,50,60], axisDecimals: 1, valueDecimals: 1 },
   'e2-2022-48': { ticks: [0,30], valueDecimals: 2 },
@@ -253,8 +259,8 @@ function articleView(essay, historic = false) {
   const localPatterns = (r.sentences ?? []).map(s => sentenceCard(s,r)).join('');
   const contents = [
     panel('source', optional(r.origin, '资料来源', 'subtle') + text(r.prompt, 'en') + text(r.promptCn) +
-      chart(r) + photo(a.promptImage, '题干原图')),
-    panel('draft', optional(r.draftCaution, '手写辨读说明', 'callout') + text(r.initial, 'en raw') + photo(a.draftImage,'手写原图')),
+      chart(r) + photo(a.promptImage, r.chart?.length ? '题图参考' : '题干原图')),
+    panel('draft', optional(r.draftCaution, '手写辨读说明', 'callout') + text(r.initial, 'en raw') + draftPhotos(a)),
     panel('review', '<div class="duo"><div class="inset"><h3>初稿估分</h3>' + e(r.score || '待补充') +
       '</div><div class="inset"><h3>精修稿估分</h3>' + e(r.modelScore || '待补充') + '</div></div>' +
       optional(r.scoreNote, '估分说明', 'subtle') + '<div class="duo"><div class="inset"><h3>可保留</h3>' + list(r.strengths) +
@@ -343,7 +349,8 @@ function manage(edit) {
 function editor(selected) {
   const record = selected?.record ?? baseRecord;
   const meta = { ...record };
-  for (const key of ['promptImage','draftImage','type','id', ...editorFields.map(([name]) => name)]) delete meta[key];
+  for (const key of ['promptImage','draftImage','draftImages','type','id', ...editorFields.map(([name]) => name)]) delete meta[key];
+  const pageCount = selected?.assets.draftImages?.length ?? 0;
   main.innerHTML = '<div class="wrap">' + link('/manage','← 返回数据管理','breadcrumb') +
     '<section class="surface panel"><h1>' + (selected ? '编辑作文' : '新增作文') + '</h1>' +
     '<form id="editor" class="edit-form" style="margin-top:16px"><div class="duo"><label>稳定 ID<input name="record-id" ' +
@@ -356,7 +363,11 @@ function editor(selected) {
       '<label>' + label + (selected?.assets[key] ? ' · 已保存，选择文件可替换' : '') +
       '<input type="file" name="' + key + '" accept="image/jpeg,image/png,image/webp">' +
       (selected?.assets[key] ? '<span><input style="min-height:auto" type="checkbox" name="clear-' + key + '">从当前版移除</span>' : '') +
-      '</label>').join('') + '</div>' +
+    '</label>').join('') + '</div>' +
+    '<label>分张手写原图（最多 6 张）' + (pageCount ? ' · 已保存 ' + pageCount + ' 张，选新照片可替换整组' : '') +
+    '<input type="file" name="draftImages" accept="image/jpeg,image/png,image/webp" multiple>' +
+    (pageCount ? '<span><input style="min-height:auto" type="checkbox" name="clear-draftImages">从当前版移除整组原图</span>' : '') +
+    '</label>' +
     '<details><summary>图表、句型、逐句批改和其他字段</summary><p class="subtle">在 JSON 中编辑图表数据、段落、逐句批改、修改对照、句型与复习计划。保留句型 ID 可保留学习标记。</p>' +
     '<label>结构化内容<textarea class="json-area" name="metadata" spellcheck="false">' +
     e(JSON.stringify(meta,null,2)) + '</textarea></label></details><div class="inline"><button type="submit" class="button primary">保存作文</button>' +
@@ -380,6 +391,11 @@ function editor(selected) {
         if (file) result[key] = await readImage(file);
         else if (form.elements['clear-' + key]?.checked) result[key] = '';
       }
+      const pages = [...form.elements.draftImages.files];
+      if (pages.length > 6) throw Error('手写原图最多可上传 6 张。');
+      delete result.draftImages;
+      if (pages.length) result.draftImages = await Promise.all(pages.map(readImage));
+      else if (form.elements['clear-draftImages']?.checked) result.draftImages = [];
       await api(selected ? '/essays/' + result.id : '/essays', selected ? 'PUT' : 'POST',
         selected ? { record: result, version: selected.version } : { record: result });
       await reload();

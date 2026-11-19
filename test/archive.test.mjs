@@ -34,6 +34,19 @@ test('import, independent progress, live insertion, revisions and sign-in bounda
       send('/essays/'+record.id,'PUT',{record:{...record,title:'Right'},version:1}),
     ]);
     assert.deepEqual([left.status,right.status].sort(),[200,409]);
+    const edited = await (left.ok ? left : right).json();
+    const images = [record.draftImage, 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='];
+    const { draftImage, ...withoutImages } = edited.record;
+    const uploaded = await send('/essays/'+record.id,'PUT',{
+      record:{...withoutImages,draftImages:images},version:edited.version,
+    });
+    assert.equal(uploaded.status,200);
+    const gallery = await uploaded.json();
+    assert.equal(gallery.assets.draftImage,initial.essays[0].assets.draftImage);
+    assert.equal(new Set(gallery.assets.draftImages).size,2);
+    const { draftImage: reading, draftImages: pages, ...unchanged } = gallery.record;
+    const preserved = await (await send('/essays/'+record.id,'PUT',{record:unchanged,version:gallery.version})).json();
+    assert.deepEqual(preserved.assets,gallery.assets);
     assert.equal((await send('/essays','POST',{record:{id:'e2-test-large',title:'Second essay',
       prompt:'Write in about 150 words.'}})).status,201);
     const final = await (await send('/library')).json();
@@ -41,9 +54,11 @@ test('import, independent progress, live insertion, revisions and sign-in bounda
     assert.deepEqual(final.progress[record.id+':s01'],{favorite:true,mastered:true});
     const previous = await (await send('/essays/'+record.id+'/history?version=1')).json();
     assert.equal(previous.record.title,record.title);
+    assert.equal(previous.assets.draftImages,undefined);
     const backup = await (await send('/backup')).json();
     assert.equal(backup.records.find(x=>x.id===record.id).initial,record.initial);
     assert.equal(backup.records.find(x=>x.id===record.id).draftImage,record.draftImage);
+    assert.deepEqual(backup.records.find(x=>x.id===record.id).draftImages,images);
   } finally {
     env.close();
   }
